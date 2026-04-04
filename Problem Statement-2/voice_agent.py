@@ -305,6 +305,12 @@ class VoiceAgent:
                 # ── Audio output ───────────────────────────────────
                 if event_type == "response.audio.delta":
                     self.agent_speaking = True  # mute mic
+                    # Flush any mic audio already buffered — it's pre-speech noise
+                    while not self.mic_queue.empty():
+                        try:
+                            self.mic_queue.get_nowait()
+                        except queue.Empty:
+                            break
                     audio_bytes = base64.b64decode(event["delta"])
                     # Split into chunks matching the output stream blocksize
                     chunk_bytes = CHUNK_SIZE * 2  # 2 bytes per int16 sample
@@ -316,8 +322,8 @@ class VoiceAgent:
                             pass  # drop if buffer is full
 
                 elif event_type == "response.audio.done":
-                    # Agent finished speaking — unmute mic after a short delay
-                    self._loop.call_later(0.3, self._unmute_mic)
+                    # Unmute after 1.5s — gives speaker echo time to die out
+                    self._loop.call_later(1.5, self._unmute_mic)
                     # If the call is ending, wait for playback to drain then stop
                     if self._call_ending:
                         await asyncio.sleep(2.0)  # let goodbye audio play out
@@ -360,13 +366,14 @@ class VoiceAgent:
 
                 # ── Speech detection (interruption handling) ───────
                 elif event_type == "input_audio_buffer.speech_started":
-                    # User started speaking — stop agent audio and unmute mic
-                    self.agent_speaking = False
-                    while not self.playback_queue.empty():
-                        try:
-                            self.playback_queue.get_nowait()
-                        except queue.Empty:
-                            break
+                    # Only treat as real interruption if mic is already unmuted
+                    # If agent_speaking=True, this is echo from the speakers — ignore
+                    if not self.agent_speaking:
+                        while not self.playback_queue.empty():
+                            try:
+                                self.playback_queue.get_nowait()
+                            except queue.Empty:
+                                break
 
                 # ── Errors ─────────────────────────────────────────
                 elif event_type == "error":
